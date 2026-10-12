@@ -77,30 +77,40 @@ void disable_arm(NeroInterface &nero_interface, float timeout_sec) {
 }
 
 void enable_arm(NeroInterface &nero_interface, float timeout_sec) {
-  // enable arm
   auto start_time = get_time_ms();
+
   while (true) {
     nero_interface.enable_arm();
-    sleep_ms(100);
+
+    sleep_ms(50);
+
     if (nero_interface.is_arm_enabled()) {
       break;
     }
+
     if ((get_time_ms() - start_time).count() > timeout_sec * 1000) {
-      spdlog::error("Failed to enable arm");
+      spdlog::error(
+          "Failed to enable arm: arm_status={}, ctrl_mode={}",
+          static_cast<uint8_t>(nero_interface.get_arm_status()),
+          static_cast<uint8_t>(nero_interface.get_control_mode()));
       throw std::runtime_error("Failed to enable arm");
     }
-    sleep_ms(200);
+
+    sleep_ms(20);
   }
 
-  // set arm mode
-  nero_interface.set_arm_mode(ControlMode::CAN_COMMAND, MoveMode::MIT, 100,
-                              ArmController::MIT);
+  // Now that all brakes/drives are enabled, enter the actual MIT mode.
+  nero_interface.set_arm_mode(
+      ControlMode::CAN_COMMAND,
+      MoveMode::MIT,
+      100,
+      ArmController::MIT);
+
   sleep_ms(100);
 
   if (nero_interface.get_arm_status() != ArmStatus::NORMAL ||
       nero_interface.get_control_mode() != ControlMode::CAN_COMMAND ||
       nero_interface.get_move_mode() != MoveMode::MIT) {
-    spdlog::error("Failed to set arm mode");
     throw std::runtime_error("Failed to set arm mode");
   }
 }
@@ -316,23 +326,31 @@ bool NeroInterface::is_gripper_enabled() {
 }
 
 void NeroInterface::enable_arm() {
-  // Step 1: Switch to CAN_COMMAND mode with enable_can_push=0x01 so the arm
-  // starts broadcasting low-speed feedback (0x261-0x267 driver status packets).
-  // Without this, is_arm_enabled() has no status bits to read.
+  // Fix for firmware v11: Enable motors first
+  can_frame_t frame{};
+  frame.can_id = 0x471;
+  frame.data[0] = 0x08;
+  frame.data[1] = 0x02;
+  transmit(frame, 8);
+
+  // Give the controller a short opportunity to process the enable.
+  sleep_ms(10);
+
+  set_normal_mode();
+
+  sleep_ms(40);
+
   set_arm_mode(ControlMode::CAN_COMMAND, MoveMode::JOINT, 50,
                ArmController::POSITION_VELOCITY);
+  
   sleep_ms(300);
-
-  // Step 2: Send motor enable command via CAN 0x471:
-  //   Byte 0 = 0x08 (all arm joints: joint index 8 = all, per nero protocol)
-  //   Byte 1 = 0x02 (enable flag)
-  can_frame_t frame;
-  frame.can_id = 0x471;
-  frame.data[0] = 0x08; // all arm joints (nero: 8 = all joints)
-  frame.data[1] = 0x02; // enable
-  std::fill(std::begin(frame.data) + 2, std::end(frame.data), 0);
-  transmit(frame);
-  sleep_ms(600); // wait for low-speed feedback to reflect new enable status
+  // Firmware <=1.11 needs normal mode / CAN push while enabling.
+  // On your arm this request is rejected until the brake-not-released
+  // condition has cleared, so retrying it after each enable is intentional.
+  // set_arm_mode(ControlMode::CAN_COMMAND,
+  //              MoveMode::JOINT,
+  //              50,
+  //              ArmController::POSITION_VELOCITY);
 }
 
 void NeroInterface::disable_arm() {
@@ -554,4 +572,34 @@ JointState NeroInterface::get_current_state() {
   state.gripper_pos = gripper_pos_.load();
   state.gripper_effort = gripper_effort_.load();
   return state;
+}
+
+void NeroInterface::set_normal_mode() {
+  // Match pyAgxArm set_normal_mode():
+
+  // 1. Restore standalone/normal leader-follower configuration.
+  can_frame_t linkage{};
+  linkage.can_id = 0x470;
+  linkage.data[0] = 0x00; // normal / clear leader-follower config
+  linkage.data[1] = 0x00; // no feedback offset
+  linkage.data[2] = 0x00; // no control offset
+  linkage.data[3] = 0x00; // no linkage offset
+  transmit(linkage, 8);
+
+  sleep_ms(5);
+
+  // 2. Enable CAN push WITHOUT requesting a motion-mode change.
+  can_frame_t mode{};
+  mode.can_id = 0x151;
+
+  mode.data[0] = 0x01; // CAN control
+  mode.data[1] = 0xFF; // IMPORTANT: do not change MOVE mode
+  mode.data[2] = 50;   // speed %
+  mode.data[3] = 0x00; // position/velocity controller
+  mode.data[4] = 0x00;
+  mode.data[5] = 0x00;
+  mode.data[6] = 0x01; // enable CAN push
+  mode.data[7] = 0x00;
+
+  transmit(mode, 8);
 }

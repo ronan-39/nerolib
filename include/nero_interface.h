@@ -145,6 +145,7 @@ public:
   void set_emergency_stop(EmergencyStop emergency_stop);
   void set_arm_mode(ControlMode ctrl_mode, MoveMode move_mode,
                     uint8_t speed_rate, ArmController arm_controller);
+  void set_normal_mode();
 
   void set_joint_pos_vel_torque(const JointState &joint_state,
                                 const Gain &gain);

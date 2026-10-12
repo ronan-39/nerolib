@@ -157,7 +157,7 @@ bool NeroController::start() {
     return false;
   }
 
-  reset_arm(nero_interface_);
+  reset_arm(nero_interface_, 15.0f);
   reset_gripper(nero_interface_);
 
   // INITIALIZE TARGET TO CURRENT POSITION TO PREVENT HOMING GLITCH
